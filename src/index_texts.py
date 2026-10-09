@@ -6,7 +6,6 @@ import logging
 import re
 from pathlib import Path
 
-import fitz
 from neo4j import GraphDatabase
 from ollama import AsyncClient
 from pydantic import BaseModel, Field
@@ -87,13 +86,12 @@ def split_text(text: str):
     return chunks
 
 
-def extract_text_pages(text_path: Path):
-    """Yield (page_number, text) from a text."""
-    with fitz.open(text_path) as document:
-        for page_number, page in enumerate(document, start=1):
-            text = page.get_text("text")
-            if text.strip():
-                yield page_number, text
+def extract_text_file(file_path: Path):
+    """Read a UTF-8 text file and yield its content."""
+    text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+
+    if text.strip():
+        yield 1, text
 
 
 async def extract_graph(text: str) -> Extraction:
@@ -158,6 +156,7 @@ async def embed_text(text: str) -> list[float]:
     return vector
 
 
+
 def create_schema(driver):
     with driver.session(database=NEO4J_DATABASE) as session:
         session.run("""
@@ -175,16 +174,23 @@ def create_schema(driver):
             FOR (e:Entity) REQUIRE e.key IS UNIQUE
         """).consume()
 
-        session.run("""
+        session.run(f"""
             CREATE VECTOR INDEX chunk_embedding IF NOT EXISTS
             FOR (c:Chunk) ON (c.embedding)
-            OPTIONS {
-              indexConfig: {
-                `vector.dimensions`: 768,
+            OPTIONS {{
+              indexConfig: {{
+                `vector.dimensions`: {EMBEDDING_DIMENSIONS},
                 `vector.similarity_function`: 'cosine'
-              }
-            }
+              }}
+            }}
         """).consume()
+
+        # Wait until Neo4j has finished building the vector index.
+        session.run("""
+            CALL db.awaitIndex('chunk_embedding', 300)
+        """).consume()
+
+        logger.info("Vector index chunk_embedding is online.")
 
 
 def store_chunk(
@@ -310,7 +316,7 @@ async def process_text(driver, text_path: Path):
 
     total_chunks = 0
 
-    for page_number, page_text in extract_text_pages(text_path):
+    for page_number, page_text in extract_text_file(text_path):
         for chunk_number, text in enumerate(
             split_text(page_text)
         ):
@@ -357,7 +363,7 @@ async def main():
             f"Knowledge-base folder not found: {KNOWLEDGE_BASE_DIR}"
         )
 
-    text_files = sorted(KNOWLEDGE_BASE_DIR.rglob("*.text"))
+    text_files = sorted(KNOWLEDGE_BASE_DIR.rglob("*.txt"))
 
     if not text_files:
         raise FileNotFoundError(
@@ -375,8 +381,19 @@ async def main():
 
         logger.info("Found %s texts", len(text_files))
 
+        
         for text_path in text_files:
-            await process_text(driver, text_path)
+            if not text_path.is_file():
+                logger.warning("Skipping missing file: %s", text_path)
+                continue
+
+            try:
+                await process_text(driver, text_path)
+            except FileNotFoundError:
+                logger.warning(
+                "File disappeared during indexing; skipping: %s",
+                text_path,
+            )
 
         logger.info("Indexing complete.")
 
