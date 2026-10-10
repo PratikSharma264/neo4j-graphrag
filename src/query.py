@@ -102,8 +102,9 @@ def retrieve_graph_facts(chunk_id: str):
     }
 
 
-def answer_question(question: str):
-    chunks = retrieve_chunks(question)
+def answer_question(question: str, chunks=None, include_graph: bool = True):
+    if chunks is None:
+        chunks = retrieve_chunks(question)
 
     if not chunks:
         return "No relevant evidence was retrieved."
@@ -114,7 +115,11 @@ def answer_question(question: str):
     for index, chunk in enumerate(chunks, start=1):
         source_id = f"S{index}"
 
-        graph = retrieve_graph_facts(chunk["id"])
+        graph = (
+            retrieve_graph_facts(chunk["id"])
+            if include_graph
+            else {"entities": [], "relationships": []}
+        )
 
         context_parts.append(
             f"""
